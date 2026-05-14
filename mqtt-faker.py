@@ -192,7 +192,6 @@ def publish_discovery():
                 "text",
                 "lock",
                 "light",
-                "media_player",
                 "fan",
                 "cover",
             ]:
@@ -237,7 +236,6 @@ def publish_discovery():
                 "button",
                 "text",
                 "lock",
-                "media_player",
             ]:
                 if domain == "switch":
                     comp_config.update({"payload_on": "ON", "payload_off": "OFF"})
@@ -253,12 +251,6 @@ def publish_discovery():
                 elif domain == "binary_sensor":
                     comp_config.pop("command_topic", None)
                     comp_config.update({"value_template": "{{ value_json.state }}"})
-                elif domain == "media_player":
-                    comp_config.update(
-                        {
-                            "state_topic": f"mock/{name}",
-                        }
-                    )
 
             # Clean up empty values (omit keys)
             comp_config = {
