@@ -37,17 +37,23 @@ class Registry:
                 self.device_entities[device_id].append(entity)
 
     def get_target_devices(self):
-        target_device_ids = set()
+        targets = {}
+        excluded_domains = {"device_tracker", "media_player"}
+
+        # Identify all device IDs that should be excluded
+        excluded_device_ids = set()
         for entity in self.entities:
-            if entity.get("entity_id") in self.entities_in_lovelace:
+            domain = entity.get("entity_id", "").split(".")[0]
+            if domain in excluded_domains:
                 device_id = entity.get("device_id")
                 if device_id:
-                    target_device_ids.add(device_id)
+                    excluded_device_ids.add(device_id)
 
-        targets = {}
+        # Filter devices
         for device in self.devices:
-            if device["id"] in target_device_ids:
-                targets[device["id"]] = device
+            if device.get("disabled_by") is None:
+                if device["id"] not in excluded_device_ids:
+                    targets[device["id"]] = device
         return targets
 
 
