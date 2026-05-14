@@ -12,6 +12,84 @@ LOVELACE_PATH = "ui-lovelace.yaml"
 MOCK_YAML_PATH = "mock.yaml"
 BASE_TOPIC = "mock"
 
+ALLOWED_SENSOR_CLASSES = {
+    "date",
+    "enum",
+    "timestamp",
+    "absolute_humidity",
+    "apparent_power",
+    "aqi",
+    "area",
+    "atmospheric_pressure",
+    "battery",
+    "blood_glucose_concentration",
+    "carbon_monoxide",
+    "carbon_dioxide",
+    "conductivity",
+    "current",
+    "data_rate",
+    "data_size",
+    "distance",
+    "duration",
+    "energy",
+    "energy_distance",
+    "energy_storage",
+    "frequency",
+    "gas",
+    "humidity",
+    "illuminance",
+    "irradiance",
+    "moisture",
+    "monetary",
+    "nitrogen_dioxide",
+    "nitrogen_monoxide",
+    "nitrous_oxide",
+    "ozone",
+    "ph",
+    "pm1",
+    "pm10",
+    "pm25",
+    "pm4",
+    "power_factor",
+    "power",
+    "precipitation",
+    "precipitation_intensity",
+    "pressure",
+    "reactive_energy",
+    "reactive_power",
+    "signal_strength",
+    "sound_pressure",
+    "speed",
+    "sulphur_dioxide",
+    "temperature",
+    "temperature_delta",
+    "volatile_organic_compounds",
+    "volatile_organic_compounds_parts",
+    "voltage",
+    "volume",
+    "volume_storage",
+    "volume_flow_rate",
+    "water",
+    "weight",
+    "wind_direction",
+    "wind_speed",
+}
+
+EXCLUDED_PLATFORMS = {"nmap_tracker", "unifi"}
+EXCLUDED_DOMAINS = {"device_tracker", "media_player"}
+COMMAND_DOMAINS = {
+    "switch",
+    "number",
+    "select",
+    "button",
+    "text",
+    "lock",
+    "light",
+    "fan",
+    "cover",
+    "event",
+}
+
 
 def slugify(text):
     return re.sub(r"[^a-z0-9_]+", "_", text.lower()).strip("_")
@@ -26,14 +104,11 @@ class Registry:
     def __init__(self):
         self.devices = load_json(DEVICE_REGISTRY_PATH)["data"]["devices"]
         self.entities = load_json(ENTITY_REGISTRY_PATH)["data"]["entities"]
-
         with open(LOVELACE_PATH, "r") as f:
             lovelace_content = f.read()
-
         self.entities_in_lovelace = set(
             re.findall(r"[a-z0-9_]+\.[a-z0-9_]+", lovelace_content)
         )
-
         self.device_entities = {}
         for entity in self.entities:
             device_id = entity.get("device_id")
@@ -44,20 +119,17 @@ class Registry:
 
     def get_target_devices(self):
         targets = {}
-        excluded_domains = {"device_tracker"}
-
-        excluded_device_ids = set()
+        allowed_device_ids = set()
         for entity in self.entities:
+            platform = entity.get("platform")
             domain = entity.get("entity_id", "").split(".")[0]
-            if domain in excluded_domains:
+            if domain not in EXCLUDED_DOMAINS and platform not in EXCLUDED_PLATFORMS:
                 device_id = entity.get("device_id")
                 if device_id:
-                    excluded_device_ids.add(device_id)
-
+                    allowed_device_ids.add(device_id)
         for device in self.devices:
-            if device.get("disabled_by") is None:
-                if device["id"] not in excluded_device_ids:
-                    targets[device["id"]] = device
+            if device.get("disabled_by") is None and device["id"] in allowed_device_ids:
+                targets[device["id"]] = device
         return targets
 
 
@@ -76,8 +148,8 @@ def on_message(client, userdata, msg):
                 json.dumps(data) if isinstance(data, dict) else data,
                 retain=True,
             )
-        except (UnicodeDecodeError, TypeError, ValueError) as e:
-            print(f"Error handling MQTT message: {e}")
+        except Exception as e:
+            print(f"Error: {e}")
 
 
 def start_emulation():
@@ -85,11 +157,86 @@ def start_emulation():
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     client.connect(MQTT_BROKER, MQTT_PORT, 60)
     client.on_message = on_message
-    devices = reg.get_target_devices()
-    for _, info in devices.items():
+    for _, info in reg.get_target_devices().items():
         name = slugify(info.get("name_by_user") or info.get("name"))
         client.subscribe(f"{BASE_TOPIC}/{name}/+/set/#")
     client.loop_forever()
+
+
+def get_comp_config(entity, reg, slug_name, name):
+    entity_id = entity.get("entity_id")
+    domain, registry_obj_id = entity_id.split(".", 1)
+    unique_id = entity.get("unique_id")
+    entity_state_topic = f"{BASE_TOPIC}/{slug_name}/{registry_obj_id}"
+
+    comp = {
+        "p": domain,
+        "unique_id": unique_id,
+        "state_topic": entity_state_topic,
+        "has_entity_name": True,
+        "name": entity.get("original_name") or domain.capitalize(),
+        "obj_id": registry_obj_id,
+    }
+
+    if entity_id in reg.entities_in_lovelace:
+        comp["enabled_by_default"] = True
+
+    if domain in COMMAND_DOMAINS:
+        comp["command_topic"] = f"{BASE_TOPIC}/{slug_name}/{registry_obj_id}/set"
+
+    dev_class = entity.get("original_device_class") or entity.get("device_class")
+    unit = entity.get("unit_of_measurement")
+
+    if unit == "kWh" and dev_class == "power":
+        dev_class = "energy"
+    elif unit == "W" and dev_class == "energy":
+        dev_class = "power"
+
+    if domain == "sensor" and dev_class not in ALLOWED_SENSOR_CLASSES:
+        dev_class = None
+    if dev_class:
+        comp["dev_cla"] = dev_class
+
+    if entity.get("entity_category"):
+        comp["entity_category"] = entity.get("entity_category")
+    if entity.get("icon"):
+        comp["icon"] = entity.get("icon")
+    if unit:
+        comp["unit_of_measurement"] = unit
+
+    if domain == "light":
+        comp.update(
+            {
+                "brightness": True,
+                "brightness_scale": 254,
+                "schema": "json",
+                "supported_color_modes": ["brightness"],
+            }
+        )
+    elif domain == "sensor":
+        comp.update(
+            {
+                "value_template": "{{ value_json."
+                + registry_obj_id.split("_")[-1]
+                + " }}"
+            }
+        )
+    elif domain == "switch":
+        comp.update({"payload_on": "ON", "payload_off": "OFF"})
+    elif domain == "select":
+        comp.update(
+            {"options": entity.get("capabilities", {}).get("options", ["Unknown"])}
+        )
+    elif domain == "event":
+        comp.update(
+            {
+                "event_types": entity.get("capabilities", {}).get(
+                    "event_types", ["click", "double_click", "long_press"]
+                )
+            }
+        )
+
+    return {k: v for k, v in comp.items() if v is not None or k == "name"}
 
 
 def publish_discovery():
@@ -98,18 +245,13 @@ def publish_discovery():
     client.connect(MQTT_BROKER, MQTT_PORT, 60)
     client.loop_start()
 
-    devices = reg.get_target_devices()
     universal_players = {}
-
     for entity in reg.entities:
         e_id = entity.get("entity_id", "")
         if e_id.startswith("media_player."):
-            name = e_id.split(".")[1]
-            if name not in universal_players:
-                universal_players[name] = {"entities": []}
-            universal_players[name]["entities"].append(e_id)
+            universal_players[e_id.split(".")[1]] = slugify(e_id.split(".")[1])
 
-    for device_id, info in devices.items():
+    for device_id, info in reg.get_target_devices().items():
         name = info.get("name_by_user") or info.get("name")
         slug_name = slugify(name)
         mqtt_id = next(
@@ -128,65 +270,11 @@ def publish_discovery():
         }
 
         for entity in entities:
-            entity_id = entity.get("entity_id")
-            domain, registry_obj_id = entity_id.split(".", 1)
-
-            if domain == "media_player":
+            if entity.get("entity_id", "").startswith("media_player."):
                 continue
 
-            unique_id = entity.get("unique_id")
-            cmp_key = f"{domain}_{registry_obj_id}"
-            state_topic = f"{BASE_TOPIC}/{slug_name}/{registry_obj_id}"
-
-            comp = {
-                "p": domain,
-                "unique_id": unique_id,
-                "state_topic": state_topic,
-                "has_entity_name": True,
-                "name": entity.get("original_name") or domain.capitalize(),
-                "obj_id": registry_obj_id,
-            }
-            if entity_id in reg.entities_in_lovelace:
-                comp["enabled_by_default"] = True
-
-            if domain in [
-                "switch",
-                "number",
-                "select",
-                "button",
-                "text",
-                "lock",
-                "light",
-                "fan",
-                "cover",
-            ]:
-                comp["command_topic"] = (
-                    f"{BASE_TOPIC}/{slug_name}/{registry_obj_id}/set"
-                )
-
-            if domain == "light":
-                comp.update(
-                    {
-                        "brightness": True,
-                        "brightness_scale": 254,
-                        "schema": "json",
-                        "supported_color_modes": ["brightness"],
-                    }
-                )
-            elif domain == "sensor":
-                comp.update(
-                    {
-                        "value_template": "{{ value_json."
-                        + registry_obj_id.split("_")[-1]
-                        + " }}"
-                    }
-                )
-            elif domain == "switch":
-                comp.update({"payload_on": "ON", "payload_off": "OFF"})
-
-            payload["cmps"][cmp_key] = {
-                k: v for k, v in comp.items() if v is not None or k == "name"
-            }
+            cmp_key = f"{entity.get('entity_id').split('.', 1)[0]}_{entity.get('entity_id').split('.', 1)[1]}"
+            payload["cmps"][cmp_key] = get_comp_config(entity, reg, slug_name, name)
 
         topic = f"homeassistant/device/{mqtt_id}/config"
         client.publish(topic, "", retain=True).wait_for_publish()
@@ -195,11 +283,28 @@ def publish_discovery():
     if universal_players:
         with open(MOCK_YAML_PATH, "w") as f:
             f.write("media_player:\n")
-            for name, data in universal_players.items():
-                slug = slugify(name)
-                f.write(
-                    f"  - platform: universal\n    name: {name}\n    children:\n      - switch.{slug}_power\n    commands:\n      turn_on:\n        service: mqtt.publish\n        data:\n          topic: {BASE_TOPIC}/{slug}/power_power/set\n          payload: 'ON'\n      turn_off:\n        service: mqtt.publish\n        data:\n          topic: {BASE_TOPIC}/{slug}/power_power/set\n          payload: 'OFF'\n"
-                )
+            for name, slug in universal_players.items():
+                f.write(f"""  - platform: universal
+    name: {name}
+    children:
+      - switch.{slug}_power
+    commands:
+      turn_on:
+        service: mqtt.publish
+        data:
+          topic: {BASE_TOPIC}/{slug}/power_power/set
+          payload: 'ON'
+      turn_off:
+        service: mqtt.publish
+        data:
+          topic: {BASE_TOPIC}/{slug}/power_power/set
+          payload: 'OFF'
+      volume_set:
+        service: mqtt.publish
+        data:
+          topic: {BASE_TOPIC}/{slug}/volume_volume/set
+          payload_template: '{{{{ volume }}}}'
+""")
 
     client.loop_stop()
     client.disconnect()
