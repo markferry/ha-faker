@@ -145,7 +145,7 @@ def publish_discovery():
             comp_config = {
                 "p": domain,
                 "unique_id": unique_id,
-                "state_topic": f"zigbee2mqtt/{name}",
+                "state_topic": f"mock/{name}",
             }
 
             # Use 'has_entity_name' to follow modern naming conventions
@@ -196,7 +196,7 @@ def publish_discovery():
                 "fan",
                 "cover",
             ]:
-                comp_config["command_topic"] = f"zigbee2mqtt/{name}/set"
+                comp_config["command_topic"] = f"mock/{name}/set"
 
             if domain == "light":
                 comp_config.update(
@@ -210,14 +210,14 @@ def publish_discovery():
             elif domain == "climate":
                 comp_config.update(
                     {
-                        "current_temperature_topic": f"zigbee2mqtt/{name}",
+                        "current_temperature_topic": f"mock/{name}",
                         "current_temperature_template": "{{ value_json.local_temperature }}",
-                        "temperature_command_topic": f"zigbee2mqtt/{name}/set/current_heating_setpoint",
-                        "temperature_state_topic": f"zigbee2mqtt/{name}",
+                        "temperature_command_topic": f"mock/{name}/set/current_heating_setpoint",
+                        "temperature_state_topic": f"mock/{name}",
                         "temperature_state_template": "{{ value_json.current_heating_setpoint }}",
                         "modes": ["off", "heat"],
-                        "mode_command_topic": f"zigbee2mqtt/{name}/set/system_mode",
-                        "mode_state_topic": f"zigbee2mqtt/{name}",
+                        "mode_command_topic": f"mock/{name}/set/system_mode",
+                        "mode_state_topic": f"mock/{name}",
                         "mode_state_template": "{{ value_json.system_mode }}",
                     }
                 )
@@ -256,7 +256,7 @@ def publish_discovery():
                 elif domain == "media_player":
                     comp_config.update(
                         {
-                            "state_topic": f"zigbee2mqtt/{name}",
+                            "state_topic": f"mock/{name}",
                         }
                     )
 
