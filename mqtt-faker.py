@@ -163,9 +163,7 @@ def start_emulation():
     client.loop_forever()
 
 
-def get_comp_config(entity, reg, slug_name, name):
-    entity_id = entity.get("entity_id")
-    domain, registry_obj_id = entity_id.split(".", 1)
+def get_comp_config(entity, reg, slug_name, name, domain, registry_obj_id):
     unique_id = entity.get("unique_id")
     entity_state_topic = f"{BASE_TOPIC}/{slug_name}/{registry_obj_id}"
 
@@ -178,7 +176,7 @@ def get_comp_config(entity, reg, slug_name, name):
         "obj_id": registry_obj_id,
     }
 
-    if entity_id in reg.entities_in_lovelace:
+    if entity.get("entity_id") in reg.entities_in_lovelace:
         comp["enabled_by_default"] = True
 
     if domain in COMMAND_DOMAINS:
@@ -211,6 +209,20 @@ def get_comp_config(entity, reg, slug_name, name):
                 "brightness_scale": 254,
                 "schema": "json",
                 "supported_color_modes": ["brightness"],
+            }
+        )
+    elif domain == "climate":
+        comp.update(
+            {
+                "current_temperature_topic": entity_state_topic,
+                "current_temperature_template": "{{ value_json.local_temperature }}",
+                "temperature_command_topic": f"{BASE_TOPIC}/{slug_name}/{registry_obj_id}/set/current_heating_setpoint",
+                "temperature_state_topic": entity_state_topic,
+                "temperature_state_template": "{{ value_json.current_heating_setpoint }}",
+                "modes": ["off", "heat"],
+                "mode_command_topic": f"{BASE_TOPIC}/{slug_name}/{registry_obj_id}/set/system_mode",
+                "mode_state_topic": entity_state_topic,
+                "mode_state_template": "{{ value_json.system_mode }}",
             }
         )
     elif domain == "sensor":
@@ -264,17 +276,51 @@ def publish_discovery():
         )
         entities = reg.device_entities.get(device_id, [])
         payload = {
-            "dev": {"ids": [mqtt_id], "name": name},
+            "dev": {
+                k: v
+                for k, v in {
+                    "ids": [mqtt_id],
+                    "name": name,
+                    "mf": info.get("manufacturer"),
+                    "mdl": info.get("model"),
+                    "sw": info.get("sw_version"),
+                    "hw": info.get("hw_version"),
+                }.items()
+                if v is not None
+            },
             "o": {"name": "MQTT Mocker Script"},
             "cmps": {},
         }
 
+        # Inject mock children for universal players
+        for mp_name, slug in universal_players.items():
+            if slug_name in slug:
+                for e_id, u_id, name in [
+                    (f"switch.{mp_name}_power", f"{mp_name}_power", "Power"),
+                    (
+                        f"sensor.{mp_name}_volume_level",
+                        f"{mp_name}_volume",
+                        "Volume level",
+                    ),
+                    (f"switch.{mp_name}_mute_status", f"{mp_name}_mute", "Mute status"),
+                ]:
+                    entities.append(
+                        {
+                            "entity_id": e_id,
+                            "unique_id": u_id,
+                            "original_name": name,
+                            "platform": "mqtt",
+                        }
+                    )
+
         for entity in entities:
             if entity.get("entity_id", "").startswith("media_player."):
                 continue
-
-            cmp_key = f"{entity.get('entity_id').split('.', 1)[0]}_{entity.get('entity_id').split('.', 1)[1]}"
-            payload["cmps"][cmp_key] = get_comp_config(entity, reg, slug_name, name)
+            e_id = entity.get("entity_id")
+            domain, registry_obj_id = e_id.split(".", 1)
+            payload["cmps"][f"{domain}_{registry_obj_id}"] = get_comp_config(
+                entity, reg, slug_name, name, domain, registry_obj_id
+            )
 
         topic = f"homeassistant/device/{mqtt_id}/config"
         client.publish(topic, "", retain=True).wait_for_publish()
