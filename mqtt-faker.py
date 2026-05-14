@@ -118,7 +118,6 @@ def publish_discovery():
                 "name": "DumpToMQTT Script",
             },
             "cmps": {},
-            "state_topic": f"zigbee2mqtt/{name}",
         }
 
         # Normalize device name for prefix stripping
@@ -127,6 +126,11 @@ def publish_discovery():
         for entity in entities:
             entity_id = entity.get("entity_id")
             domain, registry_obj_id = entity_id.split(".", 1)
+
+            # MQTT discovery does not support media_player components
+            if domain == "media_player":
+                continue
+
             unique_id = entity.get("unique_id")
 
             # Use a domain-prefixed key to avoid naming collisions in the cmps map
