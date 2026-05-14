@@ -9,7 +9,12 @@ MQTT_PORT = 1883
 DEVICE_REGISTRY_PATH = "dev-scripts/.storage/core.device_registry"
 ENTITY_REGISTRY_PATH = "dev-scripts/.storage/core.entity_registry"
 LOVELACE_PATH = "ui-lovelace.yaml"
+MOCK_YAML_PATH = "mock.yaml"
 BASE_TOPIC = "mock"
+
+
+def slugify(text):
+    return re.sub(r"[^a-z0-9_]+", "_", text.lower()).strip("_")
 
 
 def load_json(path):
@@ -25,7 +30,6 @@ class Registry:
         with open(LOVELACE_PATH, "r") as f:
             lovelace_content = f.read()
 
-        # Extract potential entity IDs from Lovelace config
         self.entities_in_lovelace = set(
             re.findall(r"[a-z0-9_]+\.[a-z0-9_]+", lovelace_content)
         )
@@ -40,9 +44,8 @@ class Registry:
 
     def get_target_devices(self):
         targets = {}
-        excluded_domains = {"device_tracker", "media_player"}
+        excluded_domains = {"device_tracker"}
 
-        # Identify all device IDs that should be excluded
         excluded_device_ids = set()
         for entity in self.entities:
             domain = entity.get("entity_id", "").split(".")[0]
@@ -51,7 +54,6 @@ class Registry:
                 if device_id:
                     excluded_device_ids.add(device_id)
 
-        # Filter devices
         for device in self.devices:
             if device.get("disabled_by") is None:
                 if device["id"] not in excluded_device_ids:
@@ -60,45 +62,33 @@ class Registry:
 
 
 def on_message(client, userdata, msg):
-    print(f"Received command: {msg.topic} -> {msg.payload.decode()}")
-    # Topic: BASE_TOPIC/<name>/<registry_obj_id>/set/...
-    # State topic: BASE_TOPIC/<name>/<registry_obj_id>
     parts = msg.topic.split("/")
     if len(parts) >= 4:
-        name = parts[1]
-        obj_id = parts[2]
+        name, obj_id = parts[1], parts[2]
         try:
             payload = msg.payload.decode()
             try:
                 data = json.loads(payload)
             except json.JSONDecodeError:
                 data = payload
-
-            # Simple echo for state
             client.publish(
                 f"{BASE_TOPIC}/{name}/{obj_id}",
                 json.dumps(data) if isinstance(data, dict) else data,
                 retain=True,
             )
-            print(f"Emulated response: {BASE_TOPIC}/{name}/{obj_id} -> {data}")
-        except Exception as e:
-            print(f"Error handling command: {e}")
+        except (UnicodeDecodeError, TypeError, ValueError) as e:
+            print(f"Error handling MQTT message: {e}")
 
 
 def start_emulation():
     reg = Registry()
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     client.connect(MQTT_BROKER, MQTT_PORT, 60)
-
     client.on_message = on_message
     devices = reg.get_target_devices()
     for _, info in devices.items():
-        name = info.get("name_by_user") or info.get("name")
-        # Subscribe to set commands for all components
+        name = slugify(info.get("name_by_user") or info.get("name"))
         client.subscribe(f"{BASE_TOPIC}/{name}/+/set/#")
-        print(f"Emulating device: {name}")
-
-    print("Emulation mode active. Press Ctrl+C to exit.")
     client.loop_forever()
 
 
@@ -109,33 +99,30 @@ def publish_discovery():
     client.loop_start()
 
     devices = reg.get_target_devices()
+    universal_players = {}
+
+    for entity in reg.entities:
+        e_id = entity.get("entity_id", "")
+        if e_id.startswith("media_player."):
+            name = e_id.split(".")[1]
+            if name not in universal_players:
+                universal_players[name] = {"entities": []}
+            universal_players[name]["entities"].append(e_id)
 
     for device_id, info in devices.items():
         name = info.get("name_by_user") or info.get("name")
-        mqtt_id = None
-        for id_list in info.get("identifiers", []):
-            if id_list[0] in ["mqtt", "mpd"]:
-                mqtt_id = id_list[1]
-                break
-
-        if not mqtt_id:
-            mqtt_id = f"dummy_{name}_{device_id[-6:]}"
-
+        slug_name = slugify(name)
+        mqtt_id = next(
+            (
+                id_list[1]
+                for id_list in info.get("identifiers", [])
+                if id_list[0] in ["mqtt", "mpd"]
+            ),
+            f"dummy_{slug_name}_{device_id[-6:]}",
+        )
         entities = reg.device_entities.get(device_id, [])
-
         payload = {
-            "dev": {
-                k: v
-                for k, v in {
-                    "ids": [mqtt_id],
-                    "name": name,
-                    "mf": info.get("manufacturer"),
-                    "mdl": info.get("model"),
-                    "sw": info.get("sw_version"),
-                    "hw": info.get("hw_version"),
-                }.items()
-                if v is not None
-            },
+            "dev": {"ids": [mqtt_id], "name": name},
             "o": {"name": "MQTT Mocker Script"},
             "cmps": {},
         }
@@ -149,39 +136,18 @@ def publish_discovery():
 
             unique_id = entity.get("unique_id")
             cmp_key = f"{domain}_{registry_obj_id}"
+            state_topic = f"{BASE_TOPIC}/{slug_name}/{registry_obj_id}"
 
-            entity_state_topic = f"{BASE_TOPIC}/{name}/{registry_obj_id}"
-            comp_config = {
+            comp = {
                 "p": domain,
                 "unique_id": unique_id,
-                "state_topic": entity_state_topic,
+                "state_topic": state_topic,
+                "has_entity_name": True,
+                "name": entity.get("original_name") or domain.capitalize(),
+                "obj_id": registry_obj_id,
             }
-
-            comp_config["has_entity_name"] = True
-            comp_config["name"] = entity.get("original_name")
-            comp_config["obj_id"] = registry_obj_id
-
-            if entity.get("entity_id") in reg.entities_in_lovelace:
-                comp_config["enabled_by_default"] = True
-
-            device_class = entity.get("original_device_class") or entity.get(
-                "device_class"
-            )
-            unit = entity.get("unit_of_measurement")
-
-            if unit == "kWh" and device_class == "power":
-                device_class = "energy"
-            elif unit == "W" and device_class == "energy":
-                device_class = "power"
-
-            if device_class:
-                comp_config["dev_cla"] = device_class
-            if entity.get("entity_category"):
-                comp_config["entity_category"] = entity.get("entity_category")
-            if entity.get("icon"):
-                comp_config["icon"] = entity.get("icon")
-            if unit:
-                comp_config["unit_of_measurement"] = unit
+            if entity_id in reg.entities_in_lovelace:
+                comp["enabled_by_default"] = True
 
             if domain in [
                 "switch",
@@ -194,12 +160,12 @@ def publish_discovery():
                 "fan",
                 "cover",
             ]:
-                comp_config["command_topic"] = (
-                    f"{BASE_TOPIC}/{name}/{registry_obj_id}/set"
+                comp["command_topic"] = (
+                    f"{BASE_TOPIC}/{slug_name}/{registry_obj_id}/set"
                 )
 
             if domain == "light":
-                comp_config.update(
+                comp.update(
                     {
                         "brightness": True,
                         "brightness_scale": 254,
@@ -207,66 +173,33 @@ def publish_discovery():
                         "supported_color_modes": ["brightness"],
                     }
                 )
-            elif domain == "climate":
-                comp_config.update(
-                    {
-                        "current_temperature_topic": f"{BASE_TOPIC}/{name}",
-                        "current_temperature_template": "{{ value_json.local_temperature }}",
-                        "temperature_command_topic": f"{BASE_TOPIC}/{name}/set/current_heating_setpoint",
-                        "temperature_state_topic": f"{BASE_TOPIC}/{name}",
-                        "temperature_state_template": "{{ value_json.current_heating_setpoint }}",
-                        "modes": ["off", "heat"],
-                        "mode_command_topic": f"{BASE_TOPIC}/{name}/set/system_mode",
-                        "mode_state_topic": f"{BASE_TOPIC}/{name}",
-                        "mode_state_template": "{{ value_json.system_mode }}",
-                    }
-                )
             elif domain == "sensor":
-                comp_config.update(
+                comp.update(
                     {
                         "value_template": "{{ value_json."
-                        + (registry_obj_id.split("_")[-1])
-                        + " }}",
+                        + registry_obj_id.split("_")[-1]
+                        + " }}"
                     }
                 )
-            elif domain in [
-                "switch",
-                "number",
-                "select",
-                "binary_sensor",
-                "button",
-                "text",
-                "lock",
-                "event",
-            ]:
-                if domain == "switch":
-                    comp_config.update({"payload_on": "ON", "payload_off": "OFF"})
-                elif domain == "number":
-                    caps = entity.get("capabilities") or {}
-                    for k in ["min", "max", "step"]:
-                        if k in caps:
-                            comp_config[k] = caps[k]
-                elif domain == "select":
-                    caps = entity.get("capabilities") or {}
-                    if "options" in caps:
-                        comp_config["options"] = caps["options"]
-                elif domain == "binary_sensor":
-                    comp_config.pop("command_topic", None)
-                    comp_config.update({"value_template": "{{ value_json.state }}"})
-                elif domain == "event":
-                    caps = entity.get("capabilities") or {}
-                    comp_config["event_types"] = caps.get("event_types", [])
+            elif domain == "switch":
+                comp.update({"payload_on": "ON", "payload_off": "OFF"})
 
-            comp_config = {
-                k: v for k, v in comp_config.items() if v is not None or k == "name"
+            payload["cmps"][cmp_key] = {
+                k: v for k, v in comp.items() if v is not None or k == "name"
             }
-            payload["cmps"][cmp_key] = comp_config
 
         topic = f"homeassistant/device/{mqtt_id}/config"
         client.publish(topic, "", retain=True).wait_for_publish()
-        print(json.dumps(payload))
         client.publish(topic, json.dumps(payload), retain=True)
-        print(f"Published discovery for {name}")
+
+    if universal_players:
+        with open(MOCK_YAML_PATH, "w") as f:
+            f.write("media_player:\n")
+            for name, data in universal_players.items():
+                slug = slugify(name)
+                f.write(
+                    f"  - platform: universal\n    name: {name}\n    children:\n      - switch.{slug}_power\n    commands:\n      turn_on:\n        service: mqtt.publish\n        data:\n          topic: {BASE_TOPIC}/{slug}/power_power/set\n          payload: 'ON'\n      turn_off:\n        service: mqtt.publish\n        data:\n          topic: {BASE_TOPIC}/{slug}/power_power/set\n          payload: 'OFF'\n"
+                )
 
     client.loop_stop()
     client.disconnect()
@@ -278,7 +211,6 @@ if __name__ == "__main__":
     group.add_argument("--discover", action="store_true")
     group.add_argument("--emulate", action="store_true")
     args = parser.parse_args()
-
     if args.discover:
         publish_discovery()
     else:
