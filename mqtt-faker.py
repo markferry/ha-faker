@@ -177,7 +177,10 @@ class StateStore:
         elif domain == "light":
             self.states[slug][obj_id] = {"state": "OFF", "brightness": 128}
         elif domain == "media_player":
-            self.states[slug][obj_id] = {"state": "idle", "volume_level": 0.5}
+            self.states[slug][f"{obj_id}_power"] = "OFF"
+            self.states[slug][f"{obj_id}_mute"] = "false"
+            self.states[slug][f"{obj_id}_volume"] = 0.5
+            self.states[slug][f"{obj_id}_playback_state"] = "idle"
         elif domain == "switch":
             self.states[slug][obj_id] = "OFF"
         elif domain == "sensor":
@@ -212,35 +215,51 @@ class StateStore:
     def set_attribute(self, device_slug, obj_id, attr, value):
         if device_slug not in self.states:
             self.states[device_slug] = {}
-        if obj_id not in self.states[device_slug]:
-            self.states[device_slug][obj_id] = {}
 
-        current = self.states[device_slug][obj_id]
-        if isinstance(current, dict):
-            try:
-                current[attr] = float(value)
-            except ValueError:
-                current[attr] = value
-        return current
+        current = self.states[device_slug].get(obj_id)
+
+        if not isinstance(current, dict):
+            current = {}
+
+        try:
+            current[attr] = float(value)
+        except (ValueError, TypeError):
+            current[attr] = value
+
+        self.states[device_slug][obj_id] = current
+        return self.states[device_slug]
 
 
 def on_message(client, userdata, msg):
     state_store = userdata["state_store"]
+    # Topic format: mock/{device_slug}/{entity_id}/set/{attr?}
     parts = msg.topic.split("/")
     if len(parts) >= 4:
-        device_slug, obj_id = parts[1], parts[2]
+        device_slug = parts[1]
+        entity_id = parts[2]
         payload = msg.payload.decode()
 
-        if len(parts) == 5 and parts[4]:
-            new_state = state_store.set_attribute(
-                device_slug, obj_id, parts[4], payload
-            )
+        if len(parts) > 4:
+            # Attribute set: mock/{device_slug}/{entity_id}/set/{attr}
+            attr = parts[4]
+            new_state = state_store.set_attribute(device_slug, entity_id, attr, payload)
         else:
-            new_state = state_store.update(device_slug, obj_id, payload)
+            # Basic state update: mock/{device_slug}/{entity_id}/set
+            new_state = state_store.update(device_slug, entity_id, payload)
+
+        # Publish the full state for that entity
+        if isinstance(new_state, dict):
+            publish_data = new_state.get(entity_id, new_state)
+        else:
+            publish_data = new_state
 
         client.publish(
-            f"{BASE_TOPIC}/{device_slug}/{obj_id}",
-            json.dumps(new_state) if isinstance(new_state, dict) else new_state,
+            f"{BASE_TOPIC}/{device_slug}/{entity_id}",
+            (
+                json.dumps(publish_data)
+                if isinstance(publish_data, dict)
+                else str(publish_data)
+            ),
             retain=True,
         )
 
@@ -266,7 +285,6 @@ def start_emulation():
 
 
 def get_comp_config(entity, reg, slug_name, name, domain, registry_obj_id):
-    # Ensure a unique ID by combining device/entity info
     unique_id = f"{entity.get('device_id', 'no_dev')}_{entity.get('unique_id', registry_obj_id)}"
     entity_state_topic = f"{BASE_TOPIC}/{slug_name}/{registry_obj_id}"
 
@@ -376,6 +394,88 @@ def get_comp_config(entity, reg, slug_name, name, domain, registry_obj_id):
     return {k: v for k, v in comp.items() if v is not None or k == "name"}
 
 
+def get_entity_to_slug(reg):
+    devices, floating = reg.get_target_devices()
+    entity_to_slug = {}
+    for device_id, info in devices.items():
+        name = info.get("name_by_user") or info.get("name")
+        slug = slugify(name)
+        for entity in reg.device_entities.get(device_id, []):
+            if reg._is_valid_entity(entity):
+                entity_to_slug[entity["entity_id"]] = slug
+    for entity in floating:
+        e_id = entity["entity_id"]
+        domain, obj_id = e_id.split(".", 1)
+        entity_to_slug[e_id] = slugify(obj_id)
+    return entity_to_slug
+
+
+def get_mock_entity_id(domain, slug, obj_id, suffix):
+    base = f"{obj_id}_{suffix}"
+    if base.startswith(slug):
+        return f"{domain}.{base}"
+    return f"{domain}.{slug}_{base}"
+
+
+def write_mock_yaml(reg, entity_to_slug):
+    media_players = [
+        e for e in reg.entities if e["entity_id"].startswith("media_player.")
+    ]
+    if not media_players:
+        return
+
+    with open(MOCK_YAML_PATH, "w") as f:
+        f.write("media_player:\n")
+        for mp in media_players:
+            e_id = mp["entity_id"]
+            obj_id = e_id.split(".")[1]
+            slug = entity_to_slug.get(e_id, slugify(obj_id))
+
+            power_id = get_mock_entity_id("switch", slug, obj_id, "power")
+            mute_id = get_mock_entity_id("switch", slug, obj_id, "mute")
+            volume_id = get_mock_entity_id("number", slug, obj_id, "volume")
+            state_id = get_mock_entity_id("select", slug, obj_id, "playback_state")
+
+            t_base = f"{BASE_TOPIC}/{slug}/{obj_id}"
+
+            f.write("  - platform: universal\n")
+            f.write(f"    name: {obj_id}\n")
+            f.write("    state_template: >\n")
+            f.write(f"      {{% if is_state('{power_id}', 'off') %}} off\n")
+            f.write(
+                f"      {{% else %}} {{{{ states('{state_id}') }}}} {{% endif %}}\n"
+            )
+            f.write("    attributes:\n")
+            f.write(
+                f"      is_volume_muted: \"{{{{ is_state('{mute_id}', 'on') }}}}\"\n"
+            )
+            f.write(
+                f"      volume_level: \"{{{{ states('{volume_id}') | float }}}}\"\n"
+            )
+            f.write("    commands:\n")
+            f.write(
+                f'      turn_on: {{action: mqtt.publish, data: {{topic: {t_base}_power/set, payload: "ON"}}}}\n'
+            )
+            f.write(
+                f'      turn_off: {{action: mqtt.publish, data: {{topic: {t_base}_power/set, payload: "OFF"}}}}\n'
+            )
+            f.write(
+                f'      volume_set: {{action: mqtt.publish, data: {{topic: {t_base}_volume/set, payload: "{{{{ volume }}}}"}}}}\n'
+            )
+            f.write(
+                f'      volume_mute: {{action: mqtt.publish, data: {{topic: {t_base}_mute/set, payload: "{{{{ mute }}}}"}}}}\n'
+            )
+            f.write(
+                f'      media_play: {{action: mqtt.publish, data: {{topic: {t_base}_playback_state/set, payload: "playing"}}}}\n'
+            )
+            f.write(
+                f'      media_pause: {{action: mqtt.publish, data: {{topic: {t_base}_playback_state/set, payload: "paused"}}}}\n'
+            )
+            f.write(
+                f'      media_stop: {{action: mqtt.publish, data: {{topic: {t_base}_playback_state/set, payload: "idle"}}}}\n'
+            )
+
+
 def publish_discovery():
     reg = Registry()
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
@@ -414,9 +514,62 @@ def publish_discovery():
             e_id = entity["entity_id"]
             domain, obj_id = e_id.split(".", 1)
             entity_to_slug[e_id] = slug
-            payload["cmps"][f"{domain}_{obj_id}"] = get_comp_config(
-                entity, reg, slug, name, domain, obj_id
-            )
+
+            if domain == "media_player":
+                unique_base = f"{entity.get('device_id', 'no_dev')}_{entity.get('unique_id', obj_id)}"
+
+                # Power switch
+                payload["cmps"][f"switch_{obj_id}_power"] = {
+                    "p": "switch",
+                    "unique_id": f"{unique_base}_power",
+                    "name": "Power",
+                    "obj_id": f"{obj_id}_power",
+                    "command_topic": f"{BASE_TOPIC}/{slug}/{obj_id}_power/set",
+                    "state_topic": f"{BASE_TOPIC}/{slug}/{obj_id}_power",
+                    "payload_on": "ON",
+                    "payload_off": "OFF",
+                    "has_entity_name": True,
+                }
+                # Mute switch
+                payload["cmps"][f"switch_{obj_id}_mute"] = {
+                    "p": "switch",
+                    "unique_id": f"{unique_base}_mute",
+                    "name": "Mute",
+                    "obj_id": f"{obj_id}_mute",
+                    "command_topic": f"{BASE_TOPIC}/{slug}/{obj_id}_mute/set",
+                    "state_topic": f"{BASE_TOPIC}/{slug}/{obj_id}_mute",
+                    "payload_on": "true",
+                    "payload_off": "false",
+                    "has_entity_name": True,
+                }
+                # Volume number
+                payload["cmps"][f"number_{obj_id}_volume"] = {
+                    "p": "number",
+                    "unique_id": f"{unique_base}_volume",
+                    "name": "Volume",
+                    "obj_id": f"{obj_id}_volume",
+                    "command_topic": f"{BASE_TOPIC}/{slug}/{obj_id}_volume/set",
+                    "state_topic": f"{BASE_TOPIC}/{slug}/{obj_id}_volume",
+                    "min": 0,
+                    "max": 1,
+                    "step": 0.01,
+                    "has_entity_name": True,
+                }
+                # Playback state select
+                payload["cmps"][f"select_{obj_id}_playback_state"] = {
+                    "p": "select",
+                    "unique_id": f"{unique_base}_playback_state",
+                    "name": "Playback State",
+                    "obj_id": f"{obj_id}_playback_state",
+                    "command_topic": f"{BASE_TOPIC}/{slug}/{obj_id}_playback_state/set",
+                    "state_topic": f"{BASE_TOPIC}/{slug}/{obj_id}_playback_state",
+                    "options": ["idle", "playing", "paused", "buffering", "on", "off"],
+                    "has_entity_name": True,
+                }
+            else:
+                payload["cmps"][f"{domain}_{obj_id}"] = get_comp_config(
+                    entity, reg, slug, name, domain, obj_id
+                )
 
         if payload["cmps"]:
             topic = f"homeassistant/device/{mqtt_id}/config"
@@ -432,31 +585,68 @@ def publish_discovery():
         payload = {
             "dev": {"ids": [f"dummy_{slug}"], "name": name},
             "o": {"name": "MQTT Mocker Script"},
-            "cmps": {
-                f"{domain}_{obj_id}": get_comp_config(
-                    entity, reg, slug, name, domain, obj_id
-                )
-            },
+            "cmps": {},
         }
+
+        if domain == "media_player":
+            unique_base = f"no_dev_{entity.get('unique_id', obj_id)}"
+
+            payload["cmps"][f"switch_{obj_id}_power"] = {
+                "p": "switch",
+                "unique_id": f"{unique_base}_power",
+                "name": "Power",
+                "obj_id": f"{obj_id}_power",
+                "command_topic": f"{BASE_TOPIC}/{slug}/{obj_id}_power/set",
+                "state_topic": f"{BASE_TOPIC}/{slug}/{obj_id}_power",
+                "payload_on": "ON",
+                "payload_off": "OFF",
+                "has_entity_name": True,
+            }
+            payload["cmps"][f"switch_{obj_id}_mute"] = {
+                "p": "switch",
+                "unique_id": f"{unique_base}_mute",
+                "name": "Mute",
+                "obj_id": f"{obj_id}_mute",
+                "command_topic": f"{BASE_TOPIC}/{slug}/{obj_id}_mute/set",
+                "state_topic": f"{BASE_TOPIC}/{slug}/{obj_id}_mute",
+                "payload_on": "true",
+                "payload_off": "false",
+                "has_entity_name": True,
+            }
+            payload["cmps"][f"number_{obj_id}_volume"] = {
+                "p": "number",
+                "unique_id": f"{unique_base}_volume",
+                "name": "Volume",
+                "obj_id": f"{obj_id}_volume",
+                "command_topic": f"{BASE_TOPIC}/{slug}/{obj_id}_volume/set",
+                "state_topic": f"{BASE_TOPIC}/{slug}/{obj_id}_volume",
+                "min": 0,
+                "max": 1,
+                "step": 0.01,
+                "has_entity_name": True,
+            }
+            payload["cmps"][f"select_{obj_id}_playback_state"] = {
+                "p": "select",
+                "unique_id": f"{unique_base}_playback_state",
+                "name": "Playback State",
+                "obj_id": f"{obj_id}_playback_state",
+                "command_topic": f"{BASE_TOPIC}/{slug}/{obj_id}_playback_state/set",
+                "state_topic": f"{BASE_TOPIC}/{slug}/{obj_id}_playback_state",
+                "options": ["idle", "playing", "paused", "buffering", "on", "off"],
+                "has_entity_name": True,
+            }
+        else:
+            payload["cmps"][f"{domain}_{obj_id}"] = get_comp_config(
+                entity, reg, slug, name, domain, obj_id
+            )
+
         client.publish(
             f"homeassistant/device/dummy_{slug}/config",
             json.dumps(payload),
             retain=True,
         )
 
-    media_players = [
-        e for e in reg.entities if e["entity_id"].startswith("media_player.")
-    ]
-    if media_players:
-        with open(MOCK_YAML_PATH, "w") as f:
-            f.write("media_player:\n")
-            for mp in media_players:
-                e_id = mp["entity_id"]
-                name = e_id.split(".")[1]
-                slug = entity_to_slug.get(e_id, slugify(name))
-                f.write(
-                    f'  - platform: universal\n    name: {name}\n    children:\n      - media_player.{name}\n    commands:\n      turn_on:\n        service: mqtt.publish\n        data:\n          topic: {BASE_TOPIC}/{slug}/{name}/set\n          payload: \'{{"state": "ON"}}\'\n      turn_off:\n        service: mqtt.publish\n        data:\n          topic: {BASE_TOPIC}/{slug}/{name}/set\n          payload: \'{{"state": "OFF"}}\'\n      volume_set:\n        service: mqtt.publish\n        data:\n          topic: {BASE_TOPIC}/{slug}/{name}/set\n          payload_template: \'{{"volume_level": {{{{ volume }}}}}}\'\n'
-                )
+    write_mock_yaml(reg, entity_to_slug)
 
     client.loop_stop()
     client.disconnect()
