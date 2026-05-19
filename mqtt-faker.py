@@ -501,15 +501,32 @@ def cleanup_registries():
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--discover", action="store_true")
-    group.add_argument("--emulate", action="store_true")
-    group.add_argument("--clean", action="store_true")
+    parser = argparse.ArgumentParser(
+        description="MQTT Mocker Script for Home Assistant"
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # Discover command
+    subparsers.add_parser("discover", help="Publish MQTT discovery messages")
+
+    # Emulate command
+    subparsers.add_parser("emulate", help="Start MQTT state emulation loop")
+
+    # Clean command
+    subparsers.add_parser("clean", help="Wipe Home Assistant registries (DANGER)")
+
+    # Mock command
+    subparsers.add_parser("mock", help="Regenerate mock.yaml configuration")
+
     args = parser.parse_args()
-    if args.clean:
+
+    if args.command == "clean":
         cleanup_registries()
-    elif args.discover:
+    elif args.command == "discover":
         publish_discovery()
-    else:
+    elif args.command == "mock":
+        reg = Registry()
+        entity_to_slug = get_entity_to_slug(reg)
+        write_mock_yaml(reg, entity_to_slug)
+    elif args.command == "emulate":
         start_emulation()
