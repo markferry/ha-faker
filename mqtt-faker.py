@@ -2,15 +2,12 @@ import re
 import json
 import argparse
 import os
+import sys
 import paho.mqtt.client as mqtt
 
 # Configuration
 MQTT_BROKER = "localhost"
 MQTT_PORT = 1883
-DEVICE_REGISTRY_PATH = "dev-scripts/.storage/core.device_registry"
-ENTITY_REGISTRY_PATH = "dev-scripts/.storage/core.entity_registry"
-LOVELACE_PATH = "ui-lovelace.yaml"
-MOCK_YAML_PATH = "mock.yaml"
 BASE_TOPIC = "mock"
 
 ALLOWED_SENSOR_CLASSES = {
@@ -103,12 +100,12 @@ def load_json(path):
 
 
 class Registry:
-    def __init__(self):
+    def __init__(self, device_registry_path, entity_registry_path, lovelace_path):
         self.devices = {
-            d["id"]: d for d in load_json(DEVICE_REGISTRY_PATH)["data"]["devices"]
+            d["id"]: d for d in load_json(device_registry_path)["data"]["devices"]
         }
-        self.entities = load_json(ENTITY_REGISTRY_PATH)["data"]["entities"]
-        with open(LOVELACE_PATH, "r") as f:
+        self.entities = load_json(entity_registry_path)["data"]["entities"]
+        with open(lovelace_path, "r") as f:
             lovelace_content = f.read()
         self.entities_in_lovelace = set(
             re.findall(r"[a-z0-9_]+\.[a-z0-9_]+", lovelace_content)
@@ -313,8 +310,12 @@ def _publish_entity_state(client, state_store, slug, domain, obj_id):
             client.publish(topic, payload, retain=True)
 
 
-def start_emulation():
-    reg = Registry()
+def start_emulation(base_topic):
+    reg = Registry(
+        "dev-scripts/.storage/core.device_registry",
+        "dev-scripts/.storage/core.entity_registry",
+        "ui-lovelace.yaml",
+    )
     state_store = StateStore(reg)
     client = mqtt.Client(
         mqtt.CallbackAPIVersion.VERSION2, userdata={"state_store": state_store}
@@ -468,14 +469,14 @@ def get_mock_entity_id(domain, slug, obj_id, suffix):
     return f"{domain}.{slug}_{base}"
 
 
-def write_mock_yaml(reg, entity_to_slug):
+def write_mock_yaml(reg, entity_to_slug, output_path):
     media_players = [
         e for e in reg.entities if e["entity_id"].startswith("media_player.")
     ]
     if not media_players:
         return
 
-    with open(MOCK_YAML_PATH, "w") as f:
+    with open(output_path, "w") as f:
         # Template sensors that expose media_content_type as an attribute
         # so the universal media_player can pick it up via _child_attr.
         # (universal media_player uses _child_attr for media_content_type,
@@ -561,8 +562,12 @@ def write_mock_yaml(reg, entity_to_slug):
             )
 
 
-def publish_discovery():
-    reg = Registry()
+def publish_discovery(test_dir, faker_yaml_name):
+    reg = Registry(
+        os.path.join(test_dir, ".storage/core.device_registry"),
+        os.path.join(test_dir, ".storage/core.entity_registry"),
+        os.path.join(test_dir, "ui-lovelace.yaml"),
+    )
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     client.connect(MQTT_BROKER, MQTT_PORT, 60)
     client.loop_start()
@@ -742,13 +747,14 @@ def publish_discovery():
             retain=True,
         )
 
-    write_mock_yaml(reg, entity_to_slug)
+    faker_yaml_path = os.path.join(test_dir, faker_yaml_name)
+    write_mock_yaml(reg, entity_to_slug, faker_yaml_path)
 
     client.loop_stop()
     client.disconnect()
 
 
-def cleanup_registries():
+def cleanup_registries(test_dir, force=False):
     print(
         "Cleaning up Home Assistant registries (WIPING ALL DEVICES, ENTITIES AND STATES)...",
         flush=True,
