@@ -181,6 +181,7 @@ class StateStore:
             self.states[slug][f"{obj_id}_mute"] = "false"
             self.states[slug][f"{obj_id}_volume"] = 0.5
             self.states[slug][f"{obj_id}_playback_state"] = "idle"
+            self.states[slug][f"{obj_id}_media_content_type"] = "music"
         elif domain == "switch":
             self.states[slug][obj_id] = "OFF"
         elif domain == "sensor":
@@ -212,25 +213,50 @@ class StateStore:
 
         return self.states[device_slug][obj_id]
 
-    def set_attribute(self, device_slug, obj_id, attr, value):
+    def set_attribute(self, device_slug, entity_obj_id, attr, value):
+        print(
+            f"DEBUG: set_attribute slug={device_slug} id={entity_obj_id} attr={attr} val={value}",
+            flush=True,
+        )
         if device_slug not in self.states:
             self.states[device_slug] = {}
 
-        current = self.states[device_slug].get(obj_id)
+        # In our case, the entity_id in discovery is something like ballroom_kodi_volume.
+        # But the state_store keys for media players are things like ballroom_kodi_volume (the full ID).
+        # We should just look for that exact key.
+
+        if entity_obj_id not in self.states[device_slug]:
+            # Maybe the key is partial?
+            parent_key = None
+            for key in self.states[device_slug]:
+                if entity_obj_id.startswith(key):
+                    parent_key = key
+                    break
+
+            if not parent_key:
+                parent_key = entity_obj_id
+                self.states[device_slug][parent_key] = {}
+        else:
+            parent_key = entity_obj_id
+
+        current = self.states[device_slug].get(parent_key)
+        print(f"DEBUG: parent_key={parent_key} current={current}", flush=True)
 
         if not isinstance(current, dict):
-            current = {}
+            current = {"state": current}
 
         try:
             current[attr] = float(value)
         except (ValueError, TypeError):
             current[attr] = value
 
-        self.states[device_slug][obj_id] = current
-        return self.states[device_slug]
+        self.states[device_slug][parent_key] = current
+        print(f"DEBUG: new_state={self.states[device_slug]}", flush=True)
+        return current
 
 
 def on_message(client, userdata, msg):
+    print(f"DEBUG: msg.topic={msg.topic} payload={msg.payload.decode()}", flush=True)
     state_store = userdata["state_store"]
     # Topic format: mock/{device_slug}/{entity_id}/set/{attr?}
     parts = msg.topic.split("/")
@@ -249,7 +275,15 @@ def on_message(client, userdata, msg):
 
         # Publish the full state for that entity
         if isinstance(new_state, dict):
-            publish_data = new_state.get(entity_id, new_state)
+            # Check if this is a composite entity state (has a "state" key)
+            # or a raw device dict (set_attribute returns the whole device state)
+            if entity_id in new_state:
+                publish_data = new_state[entity_id]
+            elif "state" in new_state or len(new_state) <= 3:
+                publish_data = new_state
+            else:
+                # set_attribute returned the full device state; find the right key
+                publish_data = new_state.get(entity_id, new_state)
         else:
             publish_data = new_state
 
@@ -262,6 +296,41 @@ def on_message(client, userdata, msg):
             ),
             retain=True,
         )
+
+
+def publish_initial_state(client, state_store, reg):
+    devices, floating = reg.get_target_devices()
+    for device_id, info in devices.items():
+        slug = slugify(info.get("name_by_user") or info.get("name"))
+        for entity in reg.device_entities.get(device_id, []):
+            if not reg._is_valid_entity(entity):
+                continue
+            domain, obj_id = entity["entity_id"].split(".", 1)
+            _publish_entity_state(client, state_store, slug, domain, obj_id)
+    for entity in floating:
+        if not reg._is_valid_entity(entity):
+            continue
+        domain, obj_id = entity["entity_id"].split(".", 1)
+        slug = slugify(obj_id)
+        _publish_entity_state(client, state_store, slug, domain, obj_id)
+
+
+def _publish_entity_state(client, state_store, slug, domain, obj_id):
+    if domain == "media_player":
+        suffixes = ["power", "mute", "volume", "playback_state", "media_content_type"]
+        for suffix in suffixes:
+            key = f"{obj_id}_{suffix}"
+            value = state_store.states.get(slug, {}).get(key)
+            if value is not None:
+                topic = f"{BASE_TOPIC}/{slug}/{key}"
+                payload = json.dumps(value) if isinstance(value, dict) else str(value)
+                client.publish(topic, payload, retain=True)
+    else:
+        value = state_store.states.get(slug, {}).get(obj_id)
+        if value is not None:
+            topic = f"{BASE_TOPIC}/{slug}/{obj_id}"
+            payload = json.dumps(value) if isinstance(value, dict) else str(value)
+            client.publish(topic, payload, retain=True)
 
 
 def start_emulation():
@@ -280,6 +349,8 @@ def start_emulation():
     for entity in floating:
         name = slugify(entity["entity_id"].split(".", 1)[1])
         client.subscribe(f"{BASE_TOPIC}/{name}/+/set/#")
+
+    publish_initial_state(client, state_store, reg)
 
     client.loop_forever()
 
@@ -425,6 +496,29 @@ def write_mock_yaml(reg, entity_to_slug):
         return
 
     with open(MOCK_YAML_PATH, "w") as f:
+        # Template sensors that expose media_content_type as an attribute
+        # so the universal media_player can pick it up via _child_attr.
+        # (universal media_player uses _child_attr for media_content_type,
+        #  which only reads from an active child entity's attributes,
+        #  ignoring the attributes: override dict.)
+        f.write("template:\n")
+        f.write("  - sensor:\n")
+        for mp in media_players:
+            e_id = mp["entity_id"]
+            obj_id = e_id.split(".")[1]
+            slug = entity_to_slug.get(e_id, slugify(obj_id))
+            media_content_type_id = get_mock_entity_id(
+                "select", slug, obj_id, "media_content_type"
+            )
+
+            f.write(f"    - name: {obj_id}_media_content_type_attr\n")
+            f.write(f"      state: {{{{ states('{media_content_type_id}') }}}}\n")
+            f.write("      attributes:\n")
+            f.write(
+                f"        media_content_type: {{{{ states('{media_content_type_id}') }}}}\n"
+            )
+        f.write("\n")
+
         f.write("media_player:\n")
         for mp in media_players:
             e_id = mp["entity_id"]
@@ -435,23 +529,25 @@ def write_mock_yaml(reg, entity_to_slug):
             mute_id = get_mock_entity_id("switch", slug, obj_id, "mute")
             volume_id = get_mock_entity_id("number", slug, obj_id, "volume")
             state_id = get_mock_entity_id("select", slug, obj_id, "playback_state")
+            media_content_type_id = get_mock_entity_id(
+                "select", slug, obj_id, "media_content_type"
+            )
+            child_id = f"sensor.{obj_id}_media_content_type_attr"
 
             t_base = f"{BASE_TOPIC}/{slug}/{obj_id}"
 
             f.write("  - platform: universal\n")
             f.write(f"    name: {obj_id}\n")
+            f.write(f"    children:\n")
+            f.write(f"      - {child_id}\n")
             f.write("    state_template: >\n")
             f.write(f"      {{% if is_state('{power_id}', 'off') %}} off\n")
             f.write(
                 f"      {{% else %}} {{{{ states('{state_id}') }}}} {{% endif %}}\n"
             )
             f.write("    attributes:\n")
-            f.write(
-                f"      is_volume_muted: \"{{{{ is_state('{mute_id}', 'on') }}}}\"\n"
-            )
-            f.write(
-                f"      volume_level: \"{{{{ states('{volume_id}') | float }}}}\"\n"
-            )
+            f.write(f"      is_volume_muted: {mute_id}|state\n")
+            f.write(f"      volume_level: {volume_id}|state\n")
             f.write("    commands:\n")
             f.write(
                 f'      turn_on: {{action: mqtt.publish, data: {{topic: {t_base}_power/set, payload: "ON"}}}}\n'
@@ -460,10 +556,10 @@ def write_mock_yaml(reg, entity_to_slug):
                 f'      turn_off: {{action: mqtt.publish, data: {{topic: {t_base}_power/set, payload: "OFF"}}}}\n'
             )
             f.write(
-                f'      volume_set: {{action: mqtt.publish, data: {{topic: {t_base}_volume/set, payload: "{{{{ volume }}}}"}}}}\n'
+                f'      volume_set: {{action: mqtt.publish, data: {{topic: {t_base}_volume/set, payload: "{{{{ volume_level }}}}"}}}}\n'
             )
             f.write(
-                f'      volume_mute: {{action: mqtt.publish, data: {{topic: {t_base}_mute/set, payload: "{{{{ mute }}}}"}}}}\n'
+                f'      volume_mute: {{action: mqtt.publish, data: {{topic: {t_base}_mute/set, payload: "{{{{ is_volume_muted | lower }}}}"}}}}\n'
             )
             f.write(
                 f'      media_play: {{action: mqtt.publish, data: {{topic: {t_base}_playback_state/set, payload: "playing"}}}}\n'
@@ -566,6 +662,17 @@ def publish_discovery():
                     "options": ["idle", "playing", "paused", "buffering", "on", "off"],
                     "has_entity_name": True,
                 }
+                # Content type select
+                payload["cmps"][f"select_{obj_id}_media_content_type"] = {
+                    "p": "select",
+                    "unique_id": f"{unique_base}_media_content_type",
+                    "name": "Content Type",
+                    "obj_id": f"{obj_id}_media_content_type",
+                    "command_topic": f"{BASE_TOPIC}/{slug}/{obj_id}_media_content_type/set",
+                    "state_topic": f"{BASE_TOPIC}/{slug}/{obj_id}_media_content_type",
+                    "options": ["music", "movie", "tvshow", "channel", "playlist"],
+                    "has_entity_name": True,
+                }
             else:
                 payload["cmps"][f"{domain}_{obj_id}"] = get_comp_config(
                     entity, reg, slug, name, domain, obj_id
@@ -654,7 +761,8 @@ def publish_discovery():
 
 def cleanup_registries():
     print(
-        "Cleaning up Home Assistant registries (WIPING ALL DEVICES, ENTITIES AND STATES)..."
+        "Cleaning up Home Assistant registries (WIPING ALL DEVICES, ENTITIES AND STATES)...",
+        flush=True,
     )
 
     # Files using the {"data": {"key": []}} structure
@@ -672,9 +780,9 @@ def cleanup_registries():
             data["data"][key] = []  # Wipe everything
             with open(path, "w") as f:
                 json.dump(data, f, indent=2)
-            print(f"Removed all {original_count} items from {path}")
+            print(f"Removed all {original_count} items from {path}", flush=True)
         except Exception as e:
-            print(f"Error cleaning {path}: {e}")
+            print(f"Error cleaning {path}: {e}", flush=True)
 
     # Special handling for restore_state which uses {"data": []}
     restore_path = ".storage/core.restore_state"
@@ -685,9 +793,9 @@ def cleanup_registries():
             data["data"] = []  # Wipe everything
             with open(restore_path, "w") as f:
                 json.dump(data, f, indent=2)
-            print(f"Removed all {original_count} items from {restore_path}")
+            print(f"Removed all {original_count} items from {restore_path}", flush=True)
         except Exception as e:
-            print(f"Error cleaning {restore_path}: {e}")
+            print(f"Error cleaning {restore_path}: {e}", flush=True)
 
 
 if __name__ == "__main__":
