@@ -214,34 +214,16 @@ class StateStore:
         return self.states[device_slug][obj_id]
 
     def set_attribute(self, device_slug, entity_obj_id, attr, value):
-        print(
-            f"DEBUG: set_attribute slug={device_slug} id={entity_obj_id} attr={attr} val={value}",
-            flush=True,
-        )
         if device_slug not in self.states:
             self.states[device_slug] = {}
 
-        # In our case, the entity_id in discovery is something like ballroom_kodi_volume.
-        # But the state_store keys for media players are things like ballroom_kodi_volume (the full ID).
-        # We should just look for that exact key.
-
         if entity_obj_id not in self.states[device_slug]:
-            # Maybe the key is partial?
-            parent_key = None
-            for key in self.states[device_slug]:
-                if entity_obj_id.startswith(key):
-                    parent_key = key
-                    break
-
-            if not parent_key:
-                parent_key = entity_obj_id
-                self.states[device_slug][parent_key] = {}
+            parent_key = entity_obj_id
+            self.states[device_slug][parent_key] = {}
         else:
             parent_key = entity_obj_id
 
         current = self.states[device_slug].get(parent_key)
-        print(f"DEBUG: parent_key={parent_key} current={current}", flush=True)
-
         if not isinstance(current, dict):
             current = {"state": current}
 
@@ -251,12 +233,10 @@ class StateStore:
             current[attr] = value
 
         self.states[device_slug][parent_key] = current
-        print(f"DEBUG: new_state={self.states[device_slug]}", flush=True)
         return current
 
 
 def on_message(client, userdata, msg):
-    print(f"DEBUG: msg.topic={msg.topic} payload={msg.payload.decode()}", flush=True)
     state_store = userdata["state_store"]
     # Topic format: mock/{device_slug}/{entity_id}/set/{attr?}
     parts = msg.topic.split("/")
@@ -507,15 +487,24 @@ def write_mock_yaml(reg, entity_to_slug):
             e_id = mp["entity_id"]
             obj_id = e_id.split(".")[1]
             slug = entity_to_slug.get(e_id, slugify(obj_id))
+            playback_state_id = get_mock_entity_id(
+                "select", slug, obj_id, "playback_state"
+            )
             media_content_type_id = get_mock_entity_id(
                 "select", slug, obj_id, "media_content_type"
             )
 
-            f.write(f"    - name: {obj_id}_media_content_type_attr\n")
-            f.write(f"      state: {{{{ states('{media_content_type_id}') }}}}\n")
+            # This sensor acts as the active child for the universal
+            # media_player. Its state tracks the playback state (which
+            # must be a valid media_player state like playing/paused/idle
+            # so the universal media_player selects it as active child),
+            # and it exposes media_content_type as an attribute (which
+            # the universal media_player reads via _child_attr).
+            f.write(f"    - name: {obj_id}_mp_child\n")
+            f.write(f"      state: \"{{{{ states('{playback_state_id}') }}}}\"\n")
             f.write("      attributes:\n")
             f.write(
-                f"        media_content_type: {{{{ states('{media_content_type_id}') }}}}\n"
+                f"        media_content_type: \"{{{{ states('{media_content_type_id}') }}}}\"\n"
             )
         f.write("\n")
 
@@ -532,7 +521,7 @@ def write_mock_yaml(reg, entity_to_slug):
             media_content_type_id = get_mock_entity_id(
                 "select", slug, obj_id, "media_content_type"
             )
-            child_id = f"sensor.{obj_id}_media_content_type_attr"
+            child_id = f"sensor.{obj_id}_mp_child"
 
             t_base = f"{BASE_TOPIC}/{slug}/{obj_id}"
 
