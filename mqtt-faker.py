@@ -310,11 +310,11 @@ def _publish_entity_state(client, state_store, slug, domain, obj_id):
             client.publish(topic, payload, retain=True)
 
 
-def start_emulation(base_topic):
+def start_emulation(reference_dir, test_dir, base_topic):
     reg = Registry(
-        "dev-scripts/.storage/core.device_registry",
-        "dev-scripts/.storage/core.entity_registry",
-        "ui-lovelace.yaml",
+        os.path.join(reference_dir, ".storage/core.device_registry"),
+        os.path.join(reference_dir, ".storage/core.entity_registry"),
+        os.path.join(test_dir, "ui-lovelace.yaml"),
     )
     state_store = StateStore(reg)
     client = mqtt.Client(
@@ -562,10 +562,10 @@ def write_mock_yaml(reg, entity_to_slug, output_path):
             )
 
 
-def publish_discovery(test_dir, faker_yaml_name):
+def publish_discovery(reference_dir, test_dir, faker_yaml_name):
     reg = Registry(
-        os.path.join(test_dir, ".storage/core.device_registry"),
-        os.path.join(test_dir, ".storage/core.entity_registry"),
+        os.path.join(reference_dir, ".storage/core.device_registry"),
+        os.path.join(reference_dir, ".storage/core.entity_registry"),
         os.path.join(test_dir, "ui-lovelace.yaml"),
     )
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
@@ -755,24 +755,30 @@ def publish_discovery(test_dir, faker_yaml_name):
 
 
 def cleanup_registries(test_dir, force=False):
-    print(
-        "Cleaning up Home Assistant registries (WIPING ALL DEVICES, ENTITIES AND STATES)...",
-        flush=True,
-    )
+    storage_dir = os.path.join(test_dir, ".storage")
+
+    if not force:
+        print(f"This will wipe ALL devices, entities, and states in:", flush=True)
+        print(f"  {storage_dir}", flush=True)
+        answer = input("Are you sure? [y/N] ").strip().lower()
+        if answer != "y":
+            print("Aborted.", flush=True)
+            return
 
     # Files using the {"data": {"key": []}} structure
     storage_files = [
-        (".storage/core.device_registry", "devices"),
-        (".storage/core.entity_registry", "entities"),
+        ("core.device_registry", "devices"),
+        ("core.entity_registry", "entities"),
     ]
 
-    for path, key in storage_files:
+    for filename, key in storage_files:
+        path = os.path.join(storage_dir, filename)
         if not os.path.exists(path):
             continue
         try:
             data = load_json(path)
             original_count = len(data["data"][key])
-            data["data"][key] = []  # Wipe everything
+            data["data"][key] = []
             with open(path, "w") as f:
                 json.dump(data, f, indent=2)
             print(f"Removed all {original_count} items from {path}", flush=True)
@@ -780,12 +786,12 @@ def cleanup_registries(test_dir, force=False):
             print(f"Error cleaning {path}: {e}", flush=True)
 
     # Special handling for restore_state which uses {"data": []}
-    restore_path = ".storage/core.restore_state"
+    restore_path = os.path.join(storage_dir, "core.restore_state")
     if os.path.exists(restore_path):
         try:
             data = load_json(restore_path)
             original_count = len(data["data"])
-            data["data"] = []  # Wipe everything
+            data["data"] = []
             with open(restore_path, "w") as f:
                 json.dump(data, f, indent=2)
             print(f"Removed all {original_count} items from {restore_path}", flush=True)
@@ -795,31 +801,54 @@ def cleanup_registries(test_dir, force=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="MQTT Mocker Script for Home Assistant"
+        description="MQTT Faker — emulate real MQTT devices for a test HA instance"
     )
+    parser.add_argument(
+        "-t", "--test-dir",
+        default=os.getcwd(),
+        help="Path to the test HA instance containing .storage and ui-lovelace.yaml (default: current directory)",
+    )
+    parser.add_argument(
+        "-f", "--faker-yaml",
+        default="faker.yaml",
+        dest="faker_yaml",
+        help="Filename for the faker YAML output, relative to --test-dir (default: faker.yaml)",
+    )
+
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # Discover command
-    subparsers.add_parser("discover", help="Publish MQTT discovery messages")
+    for name in ("discover", "emulate", "fake"):
+        p = subparsers.add_parser(name, help=f"{name.capitalize()} the test instance")
+        p.add_argument(
+            "reference_dir",
+            help="Path to the reference HA instance containing .storage",
+        )
 
-    # Emulate command
-    subparsers.add_parser("emulate", help="Start MQTT state emulation loop")
-
-    # Clean command
-    subparsers.add_parser("clean", help="Wipe Home Assistant registries (DANGER)")
-
-    # Mock command
-    subparsers.add_parser("mock", help="Regenerate mock.yaml configuration")
+    clean_parser = subparsers.add_parser("clean", help="Wipe test instance registries and states")
+    clean_parser.add_argument(
+        "--force", action="store_true",
+        help="Skip confirmation prompt",
+    )
 
     args = parser.parse_args()
 
+    test_dir = args.test_dir
+    faker_yaml = args.faker_yaml
+
     if args.command == "clean":
-        cleanup_registries()
-    elif args.command == "discover":
-        publish_discovery()
-    elif args.command == "mock":
-        reg = Registry()
-        entity_to_slug = get_entity_to_slug(reg)
-        write_mock_yaml(reg, entity_to_slug)
-    elif args.command == "emulate":
-        start_emulation()
+        cleanup_registries(test_dir, force=args.force)
+    else:
+        reference_dir = args.reference_dir
+        if args.command == "discover":
+            publish_discovery(reference_dir, test_dir, faker_yaml)
+        elif args.command == "fake":
+            reg = Registry(
+                os.path.join(reference_dir, ".storage/core.device_registry"),
+                os.path.join(reference_dir, ".storage/core.entity_registry"),
+                os.path.join(test_dir, "ui-lovelace.yaml"),
+            )
+            entity_to_slug = get_entity_to_slug(reg)
+            faker_yaml_path = os.path.join(test_dir, faker_yaml)
+            write_mock_yaml(reg, entity_to_slug, faker_yaml_path)
+        elif args.command == "emulate":
+            start_emulation(reference_dir, test_dir, BASE_TOPIC)
