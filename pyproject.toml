@@ -13,7 +13,9 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 description = "Home Assistant Device Faker"
-dependencies = [] # Add project dependencies here, e.g. ["click", "numpy"]
+dependencies = [
+    "paho-mqtt",
+]
 dynamic = ["version"]
 license.file = "LICENSE"
 readme = "README.md"
