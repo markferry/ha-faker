@@ -7,7 +7,7 @@ import paho.mqtt.client as mqtt
 # Configuration
 MQTT_BROKER = "localhost"
 MQTT_PORT = 1883
-BASE_TOPIC = "mock"
+BASE_TOPIC = "fake"
 
 ALLOWED_SENSOR_CLASSES = {
     "date",
@@ -234,7 +234,7 @@ class StateStore:
 
 def on_message(client, userdata, msg):
     state_store = userdata["state_store"]
-    # Topic format: mock/{device_slug}/{entity_id}/set/{attr?}
+    # Topic format: fake/{device_slug}/{entity_id}/set/{attr?}
     parts = msg.topic.split("/")
     if len(parts) >= 4:
         device_slug = parts[1]
@@ -242,11 +242,11 @@ def on_message(client, userdata, msg):
         payload = msg.payload.decode()
 
         if len(parts) > 4:
-            # Attribute set: mock/{device_slug}/{entity_id}/set/{attr}
+            # Attribute set: fake/{device_slug}/{entity_id}/set/{attr}
             attr = parts[4]
             new_state = state_store.set_attribute(device_slug, entity_id, attr, payload)
         else:
-            # Basic state update: mock/{device_slug}/{entity_id}/set
+            # Basic state update: fake/{device_slug}/{entity_id}/set
             new_state = state_store.update(device_slug, entity_id, payload)
 
         # Publish the full state for that entity
@@ -461,14 +461,14 @@ def get_entity_to_slug(reg):
     return entity_to_slug
 
 
-def get_mock_entity_id(domain, slug, obj_id, suffix):
+def get_fake_entity_id(domain, slug, obj_id, suffix):
     base = f"{obj_id}_{suffix}"
     if base.startswith(slug):
         return f"{domain}.{base}"
     return f"{domain}.{slug}_{base}"
 
 
-def write_mock_yaml(reg, entity_to_slug, output_path):
+def write_fake_yaml(reg, entity_to_slug, output_path):
     media_players = [
         e for e in reg.entities if e["entity_id"].startswith("media_player.")
     ]
@@ -487,10 +487,10 @@ def write_mock_yaml(reg, entity_to_slug, output_path):
             e_id = mp["entity_id"]
             obj_id = e_id.split(".")[1]
             slug = entity_to_slug.get(e_id, slugify(obj_id))
-            playback_state_id = get_mock_entity_id(
+            playback_state_id = get_fake_entity_id(
                 "select", slug, obj_id, "playback_state"
             )
-            media_content_type_id = get_mock_entity_id(
+            media_content_type_id = get_fake_entity_id(
                 "select", slug, obj_id, "media_content_type"
             )
 
@@ -514,11 +514,11 @@ def write_mock_yaml(reg, entity_to_slug, output_path):
             obj_id = e_id.split(".")[1]
             slug = entity_to_slug.get(e_id, slugify(obj_id))
 
-            power_id = get_mock_entity_id("switch", slug, obj_id, "power")
-            mute_id = get_mock_entity_id("switch", slug, obj_id, "mute")
-            volume_id = get_mock_entity_id("number", slug, obj_id, "volume")
-            state_id = get_mock_entity_id("select", slug, obj_id, "playback_state")
-            media_content_type_id = get_mock_entity_id(
+            power_id = get_fake_entity_id("switch", slug, obj_id, "power")
+            mute_id = get_fake_entity_id("switch", slug, obj_id, "mute")
+            volume_id = get_fake_entity_id("number", slug, obj_id, "volume")
+            state_id = get_fake_entity_id("select", slug, obj_id, "playback_state")
+            media_content_type_id = get_fake_entity_id(
                 "select", slug, obj_id, "media_content_type"
             )
             child_id = f"sensor.{obj_id}_mp_child"
@@ -594,7 +594,7 @@ def publish_discovery(reference_dir, test_dir, faker_yaml_name):
                 }.items()
                 if v is not None
             },
-            "o": {"name": "MQTT Mocker Script"},
+            "o": {"name": "MQTT Faker Script"},
             "cmps": {},
         }
         for entity in reg.device_entities.get(device_id, []):
@@ -684,7 +684,7 @@ def publish_discovery(reference_dir, test_dir, faker_yaml_name):
 
         payload = {
             "dev": {"ids": [f"dummy_{slug}"], "name": name},
-            "o": {"name": "MQTT Mocker Script"},
+            "o": {"name": "MQTT Faker Script"},
             "cmps": {},
         }
 
@@ -747,7 +747,7 @@ def publish_discovery(reference_dir, test_dir, faker_yaml_name):
         )
 
     faker_yaml_path = os.path.join(test_dir, faker_yaml_name)
-    write_mock_yaml(reg, entity_to_slug, faker_yaml_path)
+    write_fake_yaml(reg, entity_to_slug, faker_yaml_path)
 
     client.loop_stop()
     client.disconnect()
@@ -853,6 +853,6 @@ if __name__ == "__main__":
             )
             entity_to_slug = get_entity_to_slug(reg)
             faker_yaml_path = os.path.join(test_dir, faker_yaml)
-            write_mock_yaml(reg, entity_to_slug, faker_yaml_path)
+            write_fake_yaml(reg, entity_to_slug, faker_yaml_path)
         elif args.command == "emulate":
             start_emulation(reference_dir, test_dir, BASE_TOPIC)
