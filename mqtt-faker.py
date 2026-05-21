@@ -2,7 +2,6 @@ import re
 import json
 import argparse
 import os
-import sys
 import paho.mqtt.client as mqtt
 
 # Configuration
@@ -528,7 +527,7 @@ def write_mock_yaml(reg, entity_to_slug, output_path):
 
             f.write("  - platform: universal\n")
             f.write(f"    name: {obj_id}\n")
-            f.write(f"    children:\n")
+            f.write("    children:\n")
             f.write(f"      - {child_id}\n")
             f.write("    state_template: >\n")
             f.write(f"      {{% if is_state('{power_id}', 'off') %}} off\n")
@@ -758,7 +757,7 @@ def cleanup_registries(test_dir, force=False):
     storage_dir = os.path.join(test_dir, ".storage")
 
     if not force:
-        print(f"This will wipe ALL devices, entities, and states in:", flush=True)
+        print("This will wipe ALL devices, entities, and states in:", flush=True)
         print(f"  {storage_dir}", flush=True)
         answer = input("Are you sure? [y/N] ").strip().lower()
         if answer != "y":
@@ -804,12 +803,14 @@ if __name__ == "__main__":
         description="MQTT Faker — emulate real MQTT devices for a test HA instance"
     )
     parser.add_argument(
-        "-t", "--test-dir",
+        "-t",
+        "--test-dir",
         default=os.getcwd(),
         help="Path to the test HA instance containing .storage and ui-lovelace.yaml (default: current directory)",
     )
     parser.add_argument(
-        "-f", "--faker-yaml",
+        "-f",
+        "--faker-yaml",
         default="faker.yaml",
         dest="faker_yaml",
         help="Filename for the faker YAML output, relative to --test-dir (default: faker.yaml)",
@@ -824,9 +825,12 @@ if __name__ == "__main__":
             help="Path to the reference HA instance containing .storage",
         )
 
-    clean_parser = subparsers.add_parser("clean", help="Wipe test instance registries and states")
+    clean_parser = subparsers.add_parser(
+        "clean", help="Wipe test instance registries and states"
+    )
     clean_parser.add_argument(
-        "--force", action="store_true",
+        "--force",
+        action="store_true",
         help="Skip confirmation prompt",
     )
 
