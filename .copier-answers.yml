@@ -1,0 +1,16 @@
+# Changes here will be overwritten by Copier
+_commit: 5.1.0
+_src_path: https://github.com/DiamondLightSource/python-copier-template.git
+author_email: github@markferry.net
+author_name: Mark Ferry
+description: Home Assistant Device Faker
+distribution_name: ha-faker
+docker: false
+docs_type: README
+git_platform: github.com
+github_org: markferry
+package_name: ha_faker
+pypi: true
+repo_name: ha-faker
+strict_typing: true
+type_checker: pyright
