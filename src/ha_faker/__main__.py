@@ -184,6 +184,7 @@ class StateStore:
             self.states[slug][f"{obj_id}_volume"] = 0.5
             self.states[slug][f"{obj_id}_playback_state"] = "idle"
             self.states[slug][f"{obj_id}_media_content_type"] = "music"
+            self.states[slug][f"{obj_id}_source"] = "hdmi1"
         elif domain == "switch":
             self.states[slug][obj_id] = "OFF"
         elif domain == "sensor":
