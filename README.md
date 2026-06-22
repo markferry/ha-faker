@@ -47,11 +47,9 @@ pip install .
 
 ### Create Fake Devices
 
-```bash
-hass -c .  # run your test system
-# wait until it's started
-ha-faker discover ./path/to/live/config  # it must contain a .storage
-```
+    hass -c .  # run your test system
+    # wait until it's started
+    ha-faker discover ./path/to/live/config  # it must contain a .storage
 
 Your test system parses the MQTT Discovery messages and populates its Devices and Entities.
 
@@ -67,6 +65,10 @@ This runs an MQTT client which responds to commands from the test system.
 ### Fakes for Media Players
 
 Domains like `media_player` are not supported by the MQTT platform.
+
+Media Players are faked using a
+[Universal Media Player](https://www.home-assistant.io/integrations/universal/)
+backed by MQTT-discovered child devices.
 
 For these we generate fake devices as a
 [YAML package](https://www.home-assistant.io/docs/configuration/packages/)
@@ -87,9 +89,23 @@ homeassistant:
     package_faker: !include faker.yaml
 ```
 
-Media Players are faked using a
-[Universal Media Player](https://www.home-assistant.io/integrations/universal/)
-backed by MQTT-discovered child devices.
+Alternatively, if you want to commit it to version control then add it as an
+optional include:
+
+1. Generate the fake package to a subdirectory
+   ```bash
+   mkdir faker
+   ha-faker -f faker/package.yaml fake ./path/to/live/config
+   ```
+
+2. Add it to your config like so
+   ```yaml
+   homeassistant:
+     ...
+     packages:
+       package_faker: !include_dir_merge_named faker
+   ```
+3. Add `faker` to your `.gitignore`
 
 There is very limited support for media controls and metadata.
 You can test `media_players` by sending MQTT commands to the underlying devices.
